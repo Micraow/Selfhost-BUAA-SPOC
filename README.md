@@ -207,10 +207,19 @@ ffmpeg -hide_banner -y \
 | `--record-audio-codec` | 录制音频处理方式 (`libopus` / `copy`) | `libopus` |
 
 ### ASR 与后处理
+| 参数 | 说明 | 默认值 |
+| :--- | :--- | :--- |
+| `--scene-threshold` | 抽帧场景变化阈值 (0-1)，越小越敏感 | `0.08` |
+| `--vad-threshold` | VAD 灵敏度阈值 (0-1)，越小越容易在短停顿处切分，防长句粘连 | `0.3` |
+| `--vad-min-silence` | VAD 判定静音的最短时长(秒)，越小切分越碎 | `0.5` |
+| `--audio-output-format` | 降噪模式输出格式 (`wav` / `opus`) | `wav` |
+
+### 独立处理模式（非录制）
 | 参数 | 说明 |
 | :--- | :--- |
-| `--scene-threshold` | 抽帧场景变化阈值 (0-1)，越小越敏感 | `0.08` |
-| `--audio-output-format` | 降噪模式输出格式 (`wav` / `opus`) | `wav` |
+| `--asr-input` | 对已有本地音视频文件执行 ASR |
+| `--denoise-input` | 对已有本地视频/音频文件做降噪并导出音频 |
+| `--stills-input` | 对已有本地视频文件提取场景变化静帧 |
 
 ---
 

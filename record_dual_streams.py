@@ -76,9 +76,10 @@ def build_parser() -> argparse.ArgumentParser:
             "使用模式：\n"
             "  1) 默认录制模式：同时提供 --teacher-url 和 --screen-url\n"
             "  2) 仅 ASR 模式：提供 --asr-input\n"
-            "  3) 仅降噪模式：提供 --denoise-input\n\n"
+            "  3) 仅降噪模式：提供 --denoise-input\n"
+            "  4) 仅抽帧模式：提供 --stills-input\n\n"
             "互斥规则：\n"
-            "  - --asr-input、--denoise-input 与录制输入互斥\n"
+            "  - 上述四种输入模式互斥\n"
             "  - --record-only 仅在录制模式下有效\n"
             "  - 仅 ASR 模式不需要再传 --enable-asr\n"
         ),
@@ -88,6 +89,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--screen-url", help="屏幕/PPT 流地址（录制模式必填）")
     parser.add_argument("--asr-input", help="对现有本地音视频文件执行 ASR")
     parser.add_argument("--denoise-input", help="对现有本地视频/音频文件做降噪并导出音频")
+    parser.add_argument("--stills-input", help="对现有本地视频文件提取场景变化静帧")
     parser.add_argument("--out-dir", default=str(DEFAULT_OUT_DIR), help="输出根目录，默认：./out")
     parser.add_argument("--session-name", default=DEFAULT_SESSION_NAME, help="会话目录名，默认：当前时间戳")
     parser.add_argument("--duration", help="录制时长，支持秒数或 HH:MM:SS[.ms]；不传则持续录制，直到手动停止")
@@ -95,8 +97,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--enable-asr", action="store_true", help="录制完成后对 teacher 录制文件执行 ASR")
     parser.add_argument("--record-only", action="store_true", help="仅录制，不执行 ASR / 抽帧等后处理")
     parser.add_argument("--sherpa-dir", help="sherpa-onnx 可执行文件所在目录")
-    parser.add_argument("--asr-model-dir", help="FireRedASR2 CTC 模型目录，内含 model*.onnx 和 tokens*.txt")
+    parser.add_argument("--asr-model-dir", help="FireRedASR2 模型目录，内含 onnx 和 tokens 文件")
     parser.add_argument("--vad-model", help="silero_vad.onnx 路径；不传则自动搜索")
+    parser.add_argument("--vad-threshold", type=float, default=0.3, help="VAD 灵敏度阈值(0-1)，越小越容易在短停顿处切分句子，默认：0.3")
+    parser.add_argument("--vad-min-silence", type=float, default=0.5, help="VAD 判定静音的最短时长(秒)，越小切分越碎，默认：0.5")
     parser.add_argument("--teacher-global-quality", default="19", help="teacher 流 QSV global quality，默认：19")
     parser.add_argument("--teacher-preset", default="medium", help="teacher 流 QSV preset，默认：medium")
     parser.add_argument("--teacher-video-codec", default="h264_qsv", choices=sorted(VALID_VIDEO_CODECS), help="teacher 流视频编码器，默认：h264_qsv")
@@ -118,9 +122,13 @@ def validate_args(args: argparse.Namespace) -> str:
     has_record_inputs = bool(args.teacher_url or args.screen_url)
     has_asr_input = bool(args.asr_input)
     has_denoise_input = bool(args.denoise_input)
+    has_stills_input = bool(args.stills_input)
 
-    if sum([has_record_inputs, has_asr_input, has_denoise_input]) == 0:
-        die("请指定一种模式：录制模式需同时传 --teacher-url 和 --screen-url；或传 --asr-input；或传 --denoise-input。")
+    if sum([has_record_inputs, has_asr_input, has_denoise_input, has_stills_input]) == 0:
+        die("请指定一种模式：录制模式需同时传 --teacher-url 和 --screen-url；或传 --asr-input；或传 --denoise-input；或传 --stills-input。")
+
+    if has_stills_input and (has_record_inputs or has_asr_input or has_denoise_input):
+        die("--stills-input 不能与录制/ASR/降噪模式同时使用。")
 
     if has_asr_input and has_denoise_input:
         die("--asr-input 与 --denoise-input 不能同时使用。")
@@ -134,14 +142,13 @@ def validate_args(args: argparse.Namespace) -> str:
         mode = "record"
     elif has_asr_input:
         mode = "asr"
-    else:
+    elif has_denoise_input:
         mode = "denoise"
+    else:
+        mode = "stills"
 
     if args.record_only and mode != "record":
         die("--record-only 仅能在录制模式下使用。")
-
-    if args.extract_stills and mode != "record":
-        die("--extract-stills 仅能在录制模式下使用。")
 
     if mode == "record" and args.record_audio_codec == "copy" and args.enable_asr:
         die("录制模式下使用 --record-audio-codec copy 时，不能同时启用 --enable-asr，因为 ASR 需要处理后的 teacher 音频。")
@@ -152,7 +159,7 @@ def validate_args(args: argparse.Namespace) -> str:
     if args.audio_channels is not None and args.audio_channels not in {"1", "2"}:
         die("--audio-channels 只能是 1 或 2。")
 
-    input_path = args.asr_input or args.denoise_input
+    input_path = args.asr_input or args.denoise_input or args.stills_input
     if input_path and not Path(input_path).is_file():
         die(f"输入文件不存在：{input_path}")
 
@@ -280,6 +287,7 @@ def build_video_encode_args(codec: str, quality: str, preset: str) -> list[str]:
         return ["-c:v", codec, "-preset", preset]
     die(f"不支持的视频编码器：{codec}")
 
+
 def build_duration_args(duration: Optional[str]) -> list[str]:
     return ["-t", duration] if duration else []
 
@@ -290,12 +298,12 @@ def common_movflags(container: str) -> list[str]:
     return []
 
 
-def run_subprocess_logged(command: list[str], log_file: Path, *, background: bool = False, stdout_path: Optional[Path] = None, check_errors: bool = True) -> LoggedProcess | None:
+def run_subprocess_logged(command: list[str], log_file: Path, *, background: bool = False, stdout_path: Optional[Path] = None, check_errors: bool = True, stream_output: bool = False) -> LoggedProcess | None:
     log_file.parent.mkdir(parents=True, exist_ok=True)
     log_handle = open(log_file, "a", encoding="utf-8")
     stdout_handle = open(stdout_path, "w", encoding="utf-8") if stdout_path else None
     stdout_target = stdout_handle or log_handle
-    stderr_target = log_handle
+    stderr_target = sys.stderr if stream_output else log_handle
 
     if background:
         process = subprocess.Popen(
@@ -446,29 +454,29 @@ def remux_ts_to_final(ts_path: Path, final_path: Path, log_path: Path, container
     log(f"转封装完成，已清理临时文件。")
 
 
-def extract_stills(args: argparse.Namespace, paths: OutputPaths) -> None:
-    if not paths.screen_output.is_file():
-        die(f"未找到用于抽帧的 screen 文件：{paths.screen_output}")
+def extract_stills(video_path: Path, args: argparse.Namespace, paths: OutputPaths) -> None:
+    if not video_path.is_file():
+        die(f"未找到用于抽帧的视频文件：{video_path}")
     paths.stills_dir.mkdir(parents=True, exist_ok=True)
     with open(paths.post_log, "a", encoding="utf-8") as handle:
         handle.write(f"[{datetime.now().strftime('%F %T')}] 提取场景静帧 -> {paths.stills_dir}\n")
 
     scene_command = [
         "ffmpeg", "-hide_banner", "-y",
-        "-i", str(paths.screen_output),
+        "-i", str(video_path),
         "-vf", f"select='gt(scene,{args.scene_threshold})',showinfo",
         "-fps_mode", "vfr",
         "-strict", "-2",
         "-q:v", "2",
         str(paths.stills_dir / "still_%010d.jpg"),
     ]
-    # 允许无帧报错，因为录制时间短没翻页是正常业务逻辑
     run_subprocess_logged(scene_command, paths.post_log, check_errors=False)
 
-    if not list(paths.stills_dir.glob("*.jpg")):
-        log("提示：未检测到 PPT 翻页，未抽取任何静帧。")
+    stills_count = len(list(paths.stills_dir.glob("*.jpg")))
+    if stills_count == 0:
+        log("提示：未检测到场景变化，未抽取任何静帧。")
     else:
-        log(f"静帧提取完成，共抽取出 {len(list(paths.stills_dir.glob('*.jpg'))) } 张图片。")
+        log(f"静帧提取完成，共抽取出 {stills_count} 张图片。")
 
 
 def find_sherpa_binary(sherpa_dir: Path) -> Path:
@@ -572,8 +580,11 @@ def run_asr_from_media(media_path: Path, args: argparse.Namespace, paths: Output
     encoder_file = find_model_file("encoder*.onnx", Path(args.asr_model_dir))
     decoder_file = find_model_file("decoder*.onnx", Path(args.asr_model_dir))
 
+    optimal_threads = min(os.cpu_count() or 4, 12)
+
     asr_args = []
     if encoder_file and decoder_file:
+        log(f"运行 FireRedASR2 Transducer + VAD (使用 {optimal_threads} 线程)...")
         with open(paths.post_log, "a", encoding="utf-8") as handle:
             handle.write(f"[{datetime.now().strftime('%F %T')}] 运行 FireRedASR2 Transducer + VAD -> {paths.asr_dir}\n")
         asr_args = [
@@ -582,6 +593,7 @@ def run_asr_from_media(media_path: Path, args: argparse.Namespace, paths: Output
         ]
     else:
         model_file = find_model_file("model*.onnx", Path(args.asr_model_dir))
+        log(f"运行 FireRedASR2 CTC + VAD (使用 {optimal_threads} 线程)...")
         with open(paths.post_log, "a", encoding="utf-8") as handle:
             handle.write(f"[{datetime.now().strftime('%F %T')}] 运行 FireRedASR2 CTC + VAD -> {paths.asr_dir}\n")
         asr_args = [f"--fire-red-asr-ctc={model_file}"]
@@ -589,11 +601,13 @@ def run_asr_from_media(media_path: Path, args: argparse.Namespace, paths: Output
     run_subprocess_logged([
         str(sherpa_bin),
         f"--silero-vad-model={vad_model}",
+        f"--silero-vad-threshold={args.vad_threshold}",
+        f"--silero-vad-min-silence-duration={args.vad_min_silence}",
         *asr_args,
         f"--tokens={tokens_file}",
-        "--num-threads=6",
+        f"--num-threads={optimal_threads}",
         str(wav_file),
-    ], paths.post_log, stdout_path=raw_out)
+    ], paths.post_log, stdout_path=raw_out, stream_output=True)
 
     segments = parse_segment_lines(raw_out)
     if not segments:
@@ -669,11 +683,13 @@ def main() -> int:
 
             if not args.record_only:
                 if args.extract_stills:
-                    extract_stills(args, paths)
+                    extract_stills(paths.screen_output, args, paths)
                 if args.enable_asr:
                     run_asr_from_media(paths.teacher_output, args, paths)
         elif mode == "asr":
             run_asr_from_media(Path(args.asr_input), args, paths)
+        elif mode == "stills":
+            extract_stills(Path(args.stills_input), args, paths)
         else:
             denoise_media_to_audio(Path(args.denoise_input), args, paths)
     finally:
