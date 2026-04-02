@@ -2,10 +2,24 @@
 
 **录制 / ASR / 降噪 一体化工具**
 
+录制，ASR，降噪都可以分开来跑，所以也可以搭配 [我跟peter-erer合作的spoc脚本](https://github.com/peter-erer/buaa-spoc-helper)下载视频，然后生成字幕，提取PPT
+
+目前最大的问题是ASR在我的CPU上只能跑到 0.7倍速，略慢。
+
+降噪是为了解决某些教室混响严重，听不清老师说话，如果还要改进，打算加个[DeepFilterNet](https://github.com/rikorose/deepfilternet)
+
+下面给的参数是为了intel核显用户优化的，用了QSV，会会快很多，用了HEVC编码视频，Opus编码音频是为了减小空间占用。
+
 > **项目背景**
 > 本工具为对北京航空航天大学 `spoc.buaa.edu.cn` 录课系统的复刻与增强。
 > 原系统需等待回放生成、经常故障、且仅限有教务排课的科目使用（班会等无法录制）。
 > 本项目使用全开源组件（FFmpeg + sherpa-onnx），实现本地化、零等待的双路录制与 AI 转写流程。
+
+## 效果展示
+
+![](./imgs/buaa-spoc-demo1.png)
+![](./imgs/buaa-spoc-demo2.png)
+![](./imgs/buaa-spoc-demo3.png)
 
 ## 📂 推荐目录结构
 
