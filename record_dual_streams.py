@@ -6,6 +6,10 @@ import shutil
 import signal
 import subprocess
 import sys
+import tempfile
+from PIL import Image
+import imagehash
+import shutil
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -100,7 +104,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--asr-model-dir", help="FireRedASR2 模型目录，内含 onnx 和 tokens 文件")
     parser.add_argument("--vad-model", help="silero_vad.onnx 路径；不传则自动搜索")
     parser.add_argument("--vad-threshold", type=float, default=0.3, help="VAD 灵敏度阈值(0-1)，越小越容易在短停顿处切分句子，默认：0.3")
-    parser.add_argument("--vad-min-silence", type=float, default=0.5, help="VAD 判定静音的最短时长(秒)，越小切分越碎，默认：0.5")
+    parser.add_argument("--vad-min-silence", type=float, default=0.3, help="VAD 判定静音的最短时长(秒)，越小切分越碎，默认：0.5")
     parser.add_argument("--teacher-global-quality", default="19", help="teacher 流 QSV global quality，默认：19")
     parser.add_argument("--teacher-preset", default="medium", help="teacher 流 QSV preset，默认：medium")
     parser.add_argument("--teacher-video-codec", default="h264_qsv", choices=sorted(VALID_VIDEO_CODECS), help="teacher 流视频编码器，默认：h264_qsv")
@@ -112,7 +116,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--audio-vbr", default="off", choices=["off", "on", "constrained"], help="Opus VBR 模式，默认：off")
     parser.add_argument("--record-audio-codec", default="libopus", choices=["libopus", "copy"], help="录制模式音频编码器，默认：libopus；排障时可改为 copy")
     parser.add_argument("--audio-channels", help="音频输出声道数，仅允许 1 或 2；默认跟随源但不超过 2")
-    parser.add_argument("--scene-threshold", default="0.08", help="抽帧场景阈值，默认：0.08")
+    parser.add_argument("--stills-fps", default="0.25", help="抽帧时每秒抽取的帧数，默认：0.25（每4秒一帧）")
+    parser.add_argument("--scene-threshold", default="5", help="感知哈希差异阈值（整数），默认：5")
     parser.add_argument("--container", default="auto", choices=sorted(VALID_CONTAINERS), help="输出容器：auto/mp4/mkv，默认：auto")
     parser.add_argument("--audio-output-format", default="wav", help="仅降噪模式音频输出格式，默认：wav")
     return parser
@@ -455,29 +460,84 @@ def remux_ts_to_final(ts_path: Path, final_path: Path, log_path: Path, container
 
 
 def extract_stills(video_path: Path, args: argparse.Namespace, paths: OutputPaths) -> None:
+    """
+    使用感知哈希(pHash)从视频中提取独特幻灯片帧。
+    流程：
+      1. 用 ffmpeg 按指定帧率抽取全部帧到临时目录。
+      2. 计算每一帧的 pHash，与上一保留帧比较，若差异 > threshold 则保留。
+      3. 将保留的帧复制到最终输出目录。
+    """
     if not video_path.is_file():
         die(f"未找到用于抽帧的视频文件：{video_path}")
-    paths.stills_dir.mkdir(parents=True, exist_ok=True)
-    with open(paths.post_log, "a", encoding="utf-8") as handle:
-        handle.write(f"[{datetime.now().strftime('%F %T')}] 提取场景静帧 -> {paths.stills_dir}\n")
 
-    scene_command = [
-        "ffmpeg", "-hide_banner", "-y",
-        "-i", str(video_path),
-        "-vf", f"select='gt(scene,{args.scene_threshold})',showinfo",
-        "-fps_mode", "vfr",
-        "-strict", "-2",
-        "-q:v", "2",
-        str(paths.stills_dir / "still_%010d.jpg"),
-    ]
-    run_subprocess_logged(scene_command, paths.post_log, check_errors=False)
+    # 检查依赖库是否安装
+    try:
+        from PIL import Image
+        import imagehash
+    except ImportError as e:
+        die(f"缺少必要的 Python 库：{e}。请安装 Pillow 和 imagehash (pip install Pillow imagehash)")
 
-    stills_count = len(list(paths.stills_dir.glob("*.jpg")))
-    if stills_count == 0:
-        log("提示：未检测到场景变化，未抽取任何静帧。")
-    else:
-        log(f"静帧提取完成，共抽取出 {stills_count} 张图片。")
+    # 解析哈希差异阈值（原 scene-threshold 参数，此处应为整数）
+    try:
+        hash_threshold = int(args.scene_threshold)
+    except ValueError:
+        die(f"--scene-threshold 作为哈希阈值时必须为整数，当前值：{args.scene_threshold}")
 
+    # 创建临时目录存放抽取的所有帧
+    with tempfile.TemporaryDirectory(prefix="stills_temp_") as temp_dir:
+        temp_path = Path(temp_dir)
+        log(f"正在从视频抽取帧 (fps={args.stills_fps}) 到临时目录...")
+
+        # 第一步：用 ffmpeg 按固定帧率抽取所有帧
+        extract_command = [
+            "ffmpeg", "-hide_banner", "-y",
+            "-i", str(video_path),
+            "-vf", f"fps={args.stills_fps}",
+            "-q:v", "2",           # 高质量 JPEG
+            str(temp_path / "frame_%06d.jpg")
+        ]
+        run_subprocess_logged(extract_command, paths.post_log, check_errors=True)
+
+        # 获取所有抽取的帧文件（按名称排序以保证时间顺序）
+        frame_files = sorted(temp_path.glob("frame_*.jpg"))
+        if not frame_files:
+            log("警告：未从视频中抽取到任何帧。")
+            return
+
+        log(f"共抽取 {len(frame_files)} 帧，开始感知哈希去重...")
+
+        # 第二步：使用 pHash 筛选独特幻灯片
+        paths.stills_dir.mkdir(parents=True, exist_ok=True)
+        unique_count = 0
+        last_hash = None
+        hash_size = 8  # 感知哈希尺寸
+
+        for idx, frame_path in enumerate(frame_files, 1):
+            try:
+                with Image.open(frame_path) as img:
+                    # 确保为 RGB 模式，避免调色板图像问题
+                    if img.mode != 'RGB':
+                        img = img.convert('RGB')
+                    current_hash = imagehash.phash(img, hash_size=hash_size)
+            except Exception as e:
+                log(f"警告：处理帧 {frame_path.name} 时出错: {e}")
+                continue
+
+            # 判断是否为新幻灯片（第一帧无条件保留）
+            if last_hash is None or (current_hash - last_hash) > hash_threshold:
+                dest_name = f"still_{unique_count + 1:04d}.jpg"
+                dest_path = paths.stills_dir / dest_name
+                shutil.copy2(frame_path, dest_path)
+                unique_count += 1
+                last_hash = current_hash
+                log(f"保留新幻灯片: {dest_name} (对应原始帧序号 {idx})")
+
+        if unique_count == 0:
+            log("提示：未检测到任何独特幻灯片。")
+        else:
+            log(f"静帧提取完成，共保留 {unique_count} 张独特幻灯片。")
+
+    # 临时目录在 with 块结束后自动清理
 
 def find_sherpa_binary(sherpa_dir: Path) -> Path:
     candidates = [
@@ -685,7 +745,8 @@ def main() -> int:
                 if args.extract_stills:
                     extract_stills(paths.screen_output, args, paths)
                 if args.enable_asr:
-                    run_asr_from_media(paths.teacher_output, args, paths)
+                    # run_asr_from_media(paths.teacher_output, args, paths)  # 从教师流提取
+                    run_asr_from_media(paths.screen_output, args, paths)
         elif mode == "asr":
             run_asr_from_media(Path(args.asr_input), args, paths)
         elif mode == "stills":

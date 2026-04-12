@@ -59,7 +59,14 @@
 
 （当前只在Linux平台测试过，并且默认使用Intel核显的QSV编码器）
 
-### 2. ASR 模型与工具下载
+### 2. Python 库依赖（仅抽帧功能需要）
+若需使用抽帧功能（`--extract-stills` 或 `--stills-input`），请安装以下 Python 库：
+
+```bash
+pip install Pillow imagehash
+```
+
+### 3. ASR 模型与工具下载
 请下载以下内容并放到上述目录结构中指定的位置：
 
 1. **sherpa-onnx 可执行文件**
@@ -162,28 +169,24 @@ python3 record_dual_streams.py \
   --vad-model ./asr_model/silero_vad.onnx
 ```
 
-### 3. 仅对已有视频提取静帧（原生 FFmpeg 命令）
-如果你只想单独抽帧，可以直接用 ffmpeg（已规避 deprecated 像素格式警告）：
+### 3. 仅对已有视频提取静帧（感知哈希去重）
 
-**场景变化抽帧（默认阈值 0.08）：**
-```bash
-ffmpeg -hide_banner -y \
-  -i input.mp4 \
-  -vf "select='gt(scene,0.08)',showinfo" \
-  -fps_mode vfr \
-  -pix_fmt yuv420p -color_range pc \
-  -q:v 2 still_%010d.jpg
-```
+若只想单独从视频中抽取独特幻灯片，使用 `--stills-input` 模式：
 
-**固定间隔抽帧（例如每 80 帧取一张）：**
 ```bash
-ffmpeg -hide_banner -y \
-  -i input.mp4 \
-  -vf "select='not(mod(n,80))',showinfo" \
-  -fps_mode vfr \
-  -pix_fmt yuv420p -color_range pc \
-  -q:v 2 still_%010d.jpg
-```
+python3 record_dual_streams.py \
+  --stills-input /path/to/video.mp4 \
+  --stills-fps 0.25 \
+  --scene-threshold 5
+  ```
+  
+  参数含义：
+
+`--stills-fps`：抽帧速率，默认 0.25（即每 4 秒取一帧）。
+
+`--scene-threshold`：哈希差异阈值，默认 5。值越大去重越强，保留的帧越少。
+
+输出的图片保存在 `out/<session_name>/screen_stills/` 目录下。
 
 ---
 
@@ -209,9 +212,11 @@ ffmpeg -hide_banner -y \
 ### ASR 与后处理
 | 参数 | 说明 | 默认值 |
 | :--- | :--- | :--- |
-| `--scene-threshold` | 抽帧场景变化阈值 (0-1)，越小越敏感 | `0.08` |
-| `--vad-threshold` | VAD 灵敏度阈值 (0-1)，越小越容易在短停顿处切分，防长句粘连 | `0.3` |
-| `--vad-min-silence` | VAD 判定静音的最短时长(秒)，越小切分越碎 | `0.5` |
+| `--extract-stills` | 录制后从 screen 视频抽取独特幻灯片（基于感知哈希去重） | 关闭 |
+| `--stills-fps` | 抽帧时每秒抽取的帧数（如 `0.25` 表示每 4 秒一帧） | `0.25` |
+| `--scene-threshold` | 感知哈希差异阈值（整数），相邻帧哈希差值大于此值视为新幻灯片 | `5` |
+| `--vad-threshold` | VAD 灵敏度阈值 (0-1) | `0.3` |
+| `--vad-min-silence` | VAD 判定静音的最短时长(秒) | `0.3` |
 | `--audio-output-format` | 降噪模式输出格式 (`wav` / `opus`) | `wav` |
 
 ### 独立处理模式（非录制）
@@ -262,13 +267,6 @@ highpass=f=80,lowpass=f=9000,afftdn=nf=-20,dynaudnorm=f=150:g=7
 
 **原因**：未正确指定 `--sherpa-dir`，或下载的预编译包目录结构不符。
 **解决**：检查 `sherpa-onnx/bin/` 下是否存在该可执行文件，并指向正确的上一级目录。
-</details>
-
-<details>
-<summary><b>5. 抽帧只提取到 1 张图片，或提示 File ended prematurely</b></summary>
-
-**原因**：录制时被强制杀掉（如 `kill -9`），导致 MKV 文件截断、索引缺失。
-**解决**：请务必使用 `Ctrl+C` 停止录制，脚本会向 FFmpeg 发送优雅退出信号（stdin `q`），确保文件尾部的索引正常写入。
 </details>
 
 ## 作者的话
